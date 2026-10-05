@@ -24,6 +24,8 @@ RVA_OBJOBJECTS = 0xbf35a80      # FChunkedFixedUObjectArray (GUObjectArray.ObjOb
 RVA_NAMEPOOL = 0xbe51ec0        # FNamePool; FNameEntryAllocator blocks at +0x10
 OBJ_ITEM_STRIDE = 0x18
 CHUNK = 65536
+# FNamePool block 0: entries 'None' and 'ByteProperty' (FNameEntryHeader = wide:1, probe hash:5, len:10)
+NAMEPOOL_BLOCK0_SIG = b'\x1e\x01None\x10\x03ByteProperty'
 
 # UObject
 O_CLASS, O_NAME, O_OUTER = 0x10, 0x18, 0x20
@@ -97,8 +99,7 @@ class UE:
         self.objarr = self.base + RVA_OBJOBJECTS
         self.namepool = self.base + RVA_NAMEPOOL + 0x10
         if not self._valid():
-            if not rescan:
-                raise UEUnavailable('engine globals not at the known offsets (game was patched?)')
+            # another build (a patch, or the Xbox app / Minecraft Launcher version): find the tables (~1 s)
             self._rescan()
 
     # raw reads -------------------------------------------------------------
@@ -327,44 +328,82 @@ class UE:
         except (MemoryError, UnicodeDecodeError, struct.error):
             return False
 
+    def _sections(self):
+        hdr = self.read(self.base, 0x1000)
+        e = int.from_bytes(hdr[0x3C:0x40], 'little')
+        nsec = int.from_bytes(hdr[e + 6:e + 8], 'little')
+        opt = int.from_bytes(hdr[e + 0x14:e + 0x16], 'little')
+        out = {}
+        for i in range(nsec):
+            o = e + 0x18 + opt + 40 * i
+            name = hdr[o:o + 8].rstrip(b'\0').decode('latin-1')
+            vsize, va = struct.unpack_from('<II', hdr, o + 8)
+            out[name] = (va, vsize)
+        return out
+
+    def exe_key(self):
+        """Identifies this game build (PE TimeDateStamp + image size)."""
+        hdr = self.read(self.base, 0x200)
+        e = int.from_bytes(hdr[0x3C:0x40], 'little')
+        return '%08x-%x' % (int.from_bytes(hdr[e + 8:e + 12], 'little'), self.size)
+
     def _rescan(self):
-        """Fallback when a patch moved the globals: brute-force the image for a
-        name pool (entry 0 == 'None', entry 4 == 'ByteProperty') and an object
-        array whose object 0 is /Script/CoreUObject."""
+        """Finds GUObjectArray.ObjObjects and FNamePool in a build whose RVAs we don't know (another patch, or
+        the Xbox app / Minecraft Launcher build).  Same engine, so the same data shapes:
+          * FNamePool block 0 starts with the entries 'None' and 'ByteProperty' (header bytes include a
+            hash of the string, identical in every build); the pool's Blocks[0] in .data points at it;
+          * FChunkedFixedUObjectArray in .data: Objects**, PreAllocated*, Max, Num, MaxChunks, NumChunks
+            with the chunk counts matching Max/Num (64K objects per chunk), object 0 = /Script/CoreUObject.
+        Results: self.objarr / self.namepool (absolute), validated."""
         self._names.clear()
-        img = self.base
-        found_pool = found_arr = None
-        step = 0x100000
-        for off in range(0, self.size, step):
-            buf = self.p.read(img + off, min(step + 0x40, self.size - off))
-            if not buf:
+        secs = self._sections()
+        dva, dsize = secs.get('.data', (0, 0))
+        if not dsize:
+            raise UEUnavailable('no .data section in the game executable')
+        data = self.p.read(self.base + dva, dsize)
+        if not data:
+            raise UEUnavailable('could not read the game executable data section')
+        # 1. the name pool's first block, somewhere on the heap
+        sig = NAMEPOOL_BLOCK0_SIG
+        block0 = None
+        addr, m = 0, None
+        from winproc import MEMORY_BASIC_INFORMATION
+        m = MEMORY_BASIC_INFORMATION()
+        while self.p.query(addr, m) and block0 is None:
+            rb, rs = m.BaseAddress or 0, m.RegionSize
+            if m.State == 0x1000 and m.Type == 0x20000 and m.Protect == 0x04 and rs < (1 << 31):
+                off = 0
+                while off < rs:
+                    b = self.p.read(rb + off, min(rs - off, (32 << 20) + 64))
+                    i = b.find(sig) if b else -1
+                    if i >= 0:
+                        block0 = rb + off + i
+                        break
+                    off += 32 << 20
+            addr = rb + rs
+            if addr >= 0x7FFFFFFFFFFF:
+                break
+        if block0 is None:
+            raise UEUnavailable('could not find the name table in memory')
+        needle = struct.pack('<Q', block0)
+        i = data.find(needle)
+        while i >= 0 and i % 8:
+            i = data.find(needle, i + 1)
+        if i < 0:
+            raise UEUnavailable('could not find the name table pointer in the executable')
+        self.namepool = self.base + dva + i
+        if self.name(0) != 'None':
+            raise UEUnavailable('name table found but entry 0 is not None')
+        # 2. the object array
+        ints = memoryview(data).cast('B')[:len(data) - len(data) % 4].cast('i')
+        for k in range(4, len(ints) - 8, 2):            # k = index of Max (8-aligned struct start = k - 4)
+            mx, num, mxc, numc = ints[k], ints[k + 1], ints[k + 2], ints[k + 3]
+            if not (1000 < num <= mx < 50_000_000) or mxc != (mx + CHUNK - 1) // CHUNK                     or numc != (num + CHUNK - 1) // CHUNK:
                 continue
-            for i in range(0, len(buf) - 0x20, 8):
-                v = struct.unpack_from('<Q', buf, i)[0]
-                if not (0x10000 < v < 0x7FFFFFFFFFFF):
-                    continue
-                if found_pool is None:
-                    # FNamePool: lock(8) CurrentBlock(4) CurrentByteCursor(4) Blocks[]
-                    try:
-                        if self.p.read(v + 2, 4) == b'None':
-                            blocks = img + off + i
-                            if blocks - 0x10 >= img:
-                                self.namepool = blocks
-                                if self.name(0) == 'None':
-                                    found_pool = blocks
-                                    continue
-                                self._names.clear()
-                    except Exception:
-                        pass
-                if found_pool is not None and found_arr is None:
-                    try:
-                        n = struct.unpack_from('<i', buf, i + 0x14)[0]
-                        if 1000 < n < 5_000_000:
-                            self.objarr = img + off + i
-                            if self.objname(self.obj(0)) == '/Script/CoreUObject':
-                                found_arr = self.objarr
-                    except Exception:
-                        pass
-            if found_pool and found_arr:
-                return
-        raise UEUnavailable('could not locate GUObjectArray/FNamePool in this game build')
+            self.objarr = self.base + dva + (k - 4) * 4
+            try:
+                if self.objname(self.obj(0)) == '/Script/CoreUObject':
+                    return
+            except (MemoryError, UnicodeDecodeError, struct.error):
+                pass
+        raise UEUnavailable('could not find the object table in the executable')

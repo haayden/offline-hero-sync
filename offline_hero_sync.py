@@ -65,10 +65,11 @@ if not getattr(sys, 'frozen', False):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 from uemem import UE  # noqa: E402
 import rebuild  # noqa: E402
+import wgs  # noqa: E402
 from winproc import Process, GameNotRunning, MEMORY_BASIC_INFORMATION, find_games  # noqa: F401  # noqa: E402
 
 APP = 'Offline Hero Sync'
-VERSION = '1.1.0'
+VERSION = '1.2.0'
 
 HEADER = b'{"SerializeMeta":{'
 MAX_BLOB = 64 << 20
@@ -115,15 +116,95 @@ def default_save_dir():
     return first
 
 
+def pick_xbox_store(xbox):
+    """The Xbox app / Minecraft Launcher save store to use, or None for the Steam build.
+    xbox: True = use it, False = never, None = only when there is no Steam SaveGames folder."""
+    if xbox is False:
+        return None
+    dirs = wgs.user_dirs()
+    if not dirs:
+        return None
+    if xbox is None and (local_appdata() / 'Dungeons2' / 'Saved' / 'SaveGames').is_dir():
+        return None
+    return dirs[0]
+
+
 class Ctx:
-    def __init__(self, save_dir=None, data_dir=None):
-        self.save_dir = Path(save_dir) if save_dir else default_save_dir()
+    def __init__(self, save_dir=None, data_dir=None, xbox=None):
         self.data_dir = Path(data_dir) if data_dir else local_appdata() / 'OfflineHeroSync'
+        self.wgs = None
+        xdir = None if save_dir else pick_xbox_store(xbox)
+        if xdir:
+            # Xbox app build: its saves live in WGS containers; the tool works on a mirror of them (one .sav per
+            # slot, like Steam's SaveGames) and writes its copies back while the game is closed (xbox_sync)
+            self.wgs = wgs.Store(xdir)
+            self.save_dir = self.data_dir / 'xbox' / xdir.name / 'SaveGames'
+        else:
+            self.save_dir = Path(save_dir) if save_dir else default_save_dir()
         self.out_dir = self.data_dir / 'out'
         self.backup_dir = self.data_dir / 'backups'
         self.cache_dir = self.data_dir / 'cache'
         self.state_file = self.data_dir / 'state.json'
         self.log_file = self.data_dir / 'autosync.log'
+
+    # ---- Xbox app build ------------------------------------------------------------------------------------------
+    def xbox_sync(self, game_running, log=None):
+        """Mirror <-> WGS containers.  Every slot is copied into the mirror unless the mirror holds a copy this
+        tool wrote that has not reached the game yet; those are written into the containers while the game is
+        closed (the game caches its saves while it runs), each container backed up first.
+        Returns the slots written into the game."""
+        if not self.wgs:
+            return []
+        st = self.load_state()
+        managed = {h['offline_id']: h for h in st['heroes'].values() if h.get('offline_id')}
+
+        def pending(h, path):
+            try:
+                return path.is_file() and content_hash(json.loads(path.read_text(encoding='utf-8'))) == \
+                    h.get('written_hash') and h.get('xbox_written_hash') != h.get('written_hash')
+            except (OSError, ValueError):
+                return False
+
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        slots = self.wgs.slots()
+        for name, (c, files) in slots.items():
+            if not files:
+                continue
+            mirror = self.save_dir / (name + '.sav')
+            data = files[0][1].read_bytes()
+            try:
+                if mirror.read_bytes() == data:
+                    continue
+            except OSError:
+                pass
+            oid = name[len('Character'):] if name.startswith('Character') else None
+            if oid in managed and pending(managed[oid], mirror):
+                continue
+            tmp = mirror.with_suffix('.ohs-tmp')
+            tmp.write_bytes(data)
+            os.replace(tmp, mirror)
+        for oid, h in managed.items():                 # a copy deleted in the game: drop it from the mirror too
+            mirror = self.save_dir / ('Character%s.sav' % oid)
+            if 'Character' + oid not in slots and mirror.is_file() and h.get('xbox_written_hash') and \
+                    not pending(h, mirror):
+                mirror.unlink()
+        written = []
+        if not game_running:
+            for oid, h in managed.items():
+                mirror = self.save_dir / ('Character%s.sav' % oid)
+                if not pending(h, mirror):
+                    continue
+                slot = 'Character' + oid
+                bk = self.wgs.backup(slot, self.backup_dir / 'xbox') if slot in slots else None
+                self.wgs.write(slot, mirror.read_bytes())
+                h['xbox_written_hash'] = h['written_hash']
+                written.append(slot)
+                if log:
+                    log('Xbox: offline copy %s written into the game\'s saves%s' % (
+                        oid[:8], ' (previous version backed up to %s)' % bk if bk else ''))
+            if written:
+                self.save_state(st)
+        return written
 
     # The game only keeps the server copy in memory for a short while after it fetches it
     # (around the character select screen), so every copy seen is cached here as the base
@@ -1511,6 +1592,15 @@ class AutoSync:
             return 'playing offline hero %s' % cid[:8]
         return 'playing online hero %s' % cid[:8]
 
+    def xbox(self, game_running, force=False):
+        if not self.ctx.wgs or (not force and time.time() < getattr(self, 'next_xbox', 0)):
+            return
+        self.next_xbox = time.time() + 60
+        try:
+            self.ctx.xbox_sync(game_running, self.log)
+        except Exception as e:            # never die on the save store; say why
+            self.log('Xbox saves: %r' % (e,), key='xbox')
+
     def tick(self):
         now = time.time()
         if not find_games():
@@ -1518,6 +1608,8 @@ class AutoSync:
                 self.log('game closed')
                 self.s.detach()
                 self.pids, self.last_state = set(), None
+                self.xbox(False, force=True)
+            self.xbox(False)
             self.log('waiting for the game to start', key='game')
             return IDLE_SLEEP
         self.s.attach()
@@ -1526,6 +1618,7 @@ class AutoSync:
             self.log('game found (process %s)' % ', '.join(str(p) for p in sorted(pids)), key='game')
             self.pids = pids
             self.burst_until, self.next_scan = now + BURST_LEN, 0
+            self.xbox(True, force=True)
         cid, in_world = self.s.active_in_game()
         st = self.ctx.load_state()
         offline_ids = {h.get('offline_id') for h in st['heroes'].values()} - {None}
@@ -1618,6 +1711,9 @@ class AutoSync:
 
 
 def run_auto(ctx, no_live=False, rescan=False):
+    if ctx.wgs:
+        AutoLog(ctx)('saves: Xbox app / Minecraft Launcher build (%s); copies are written into the game while '
+                     'it is closed' % ctx.wgs.dir)
     echo = sys.stdout is not None and hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
     log = AutoLog(ctx, echo)
     h = acquire_instance()
@@ -1714,6 +1810,8 @@ def status_text(ctx):
         lines.append('hero      : online %s -> offline %s, last written %s%s' % (
             hid[:8], (h.get('offline_id') or '?')[:8], h.get('written_at', 'never'),
             ', %s' % h['description'] if h.get('description') else ''))
+    lines.append('saves     : %s' % ('Xbox app build, %s (mirror %s)' % (ctx.wgs.dir, ctx.save_dir) if ctx.wgs
+                                     else ctx.save_dir))
     lines.append('log       : %s' % ctx.log_file)
     try:
         tail = ctx.log_file.read_text(encoding='utf-8').splitlines()[-12:]
@@ -1723,7 +1821,7 @@ def status_text(ctx):
     return '\n'.join(lines)
 
 
-AUTO_OPTS = ('--auto', '--save-dir', '--data-dir', '--no-live', '--rescan')
+AUTO_OPTS = ('--auto', '--save-dir', '--data-dir', '--no-live', '--rescan', '--xbox', '--steam')
 
 
 def wants_auto(argv):
@@ -1798,8 +1896,18 @@ def build_parser():
     ap.add_argument('--rescan', action='store_true',
                     help='if a game patch moved the engine tables, search for them (slow); '
                          'only needed for the in-world reading')
+    ap.add_argument('--xbox', action='store_true',
+                    help='use the Xbox app / Minecraft Launcher saves (default: only when there is no Steam '
+                         'SaveGames folder)')
+    ap.add_argument('--steam', action='store_true', help='use the Steam saves even if Xbox app saves exist')
+    ap.add_argument('--xbox-info', action='store_true',
+                    help='list the Xbox app saves this tool sees (read-only) and exit')
     ap.add_argument('--version', action='version', version='%s %s' % (APP, VERSION))
     return ap
+
+
+def xbox_choice(args):
+    return True if getattr(args, 'xbox', False) else False if getattr(args, 'steam', False) else None
 
 
 def main(argv=None):
@@ -1809,7 +1917,8 @@ def main(argv=None):
         return 2
     if wants_auto(argv):
         args = build_parser().parse_args(argv)
-        return run_auto(Ctx(args.save_dir, args.data_dir), no_live=args.no_live, rescan=args.rescan)
+        return run_auto(Ctx(args.save_dir, args.data_dir, xbox_choice(args)), no_live=args.no_live,
+                        rescan=args.rescan)
     opened = setup_console(new_window='--cli' in argv)
     try:
         return run(argv)
@@ -1827,11 +1936,28 @@ def run(argv):
         args = ap.parse_args(argv)
     except SystemExit as e:                   # --help / --version / bad option
         return e.code or 0
-    ctx = Ctx(args.save_dir, args.data_dir)
+    if args.xbox_info:
+        dirs = wgs.user_dirs()
+        if not dirs:
+            print('No Xbox app / Minecraft Launcher saves found (%s).' % (
+                local_appdata() / 'Packages' / wgs.PACKAGE / 'SystemAppData' / 'wgs'))
+        for d in dirs:
+            try:
+                print(wgs.describe(d))
+            except Exception as e:
+                print('%s: could not read: %r' % (d, e))
+        return 0
+    ctx = Ctx(args.save_dir, args.data_dir, xbox_choice(args))
     extra = []
     for k in ('save_dir', 'data_dir'):
         if getattr(args, k):
             extra += ['--' + k.replace('_', '-'), str(Path(getattr(args, k)).resolve())]
+    extra += ['--xbox'] if args.xbox else ['--steam'] if args.steam else []
+    if ctx.wgs:
+        try:
+            ctx.xbox_sync(bool(find_games()))
+        except Exception as e:
+            print('Xbox saves could not be read: %r' % (e,))
     try:
         if args.adopt:
             print(adopt(ctx, args.adopt))
