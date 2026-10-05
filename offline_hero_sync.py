@@ -64,10 +64,11 @@ from pathlib import Path
 if not getattr(sys, 'frozen', False):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 from uemem import UE  # noqa: E402
+import rebuild  # noqa: E402
 from winproc import Process, GameNotRunning, MEMORY_BASIC_INFORMATION, find_games  # noqa: F401  # noqa: E402
 
 APP = 'Offline Hero Sync'
-VERSION = '1.0.2'
+VERSION = '1.1.0'
 
 HEADER = b'{"SerializeMeta":{'
 MAX_BLOB = 64 << 20
@@ -938,6 +939,7 @@ class Syncer:
         self.lives = {}          # pid -> Live
         self.ue_errors = {}      # pid -> why the in-world reader is unavailable
         self.ue_errors_at = {}   # pid -> when it last failed
+        self.rebuilders = {}     # pid -> rebuild.Rebuilder
 
     def attach(self):
         found = dict(find_games())
@@ -1015,6 +1017,44 @@ class Syncer:
                 pass
         return heroes
 
+    def newest_base(self, online_id, hero, blob, cached):
+        """The newest earlier full copy of this hero (server copy in memory, cached server copy, or this tool's
+        last output), as an online save, or None."""
+        cands = [b[1] for b in (blob, cached) if b]
+        prev = hero.get('last_output')
+        if prev and Path(prev).exists():
+            try:
+                o = json.loads(Path(prev).read_text(encoding='utf-8'))
+                o['CharacterSaveV1']['MetaData']['CharacterId'] = online_id
+                o['CharacterSaveV1']['MetaData']['IsOnline'] = True
+                cands.append(o)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        if not cands:
+            return None
+        return max(cands, key=lambda o: o['CharacterSaveV1']['MetaData'].get('GameDataUpdated', 0))
+
+    def rebuild(self, online_id, base):
+        """-> (full online save rebuilt from the game, notes, '') or (None, [], why)."""
+        if self.no_live:
+            return None, [], 'in-world reading turned off'
+        self.live_readers()
+        why = []
+        for pid, lv in list(self.lives.items()):
+            rb = self.rebuilders.get(pid)
+            try:
+                if rb is None or rb.live is not lv:
+                    rb = self.rebuilders[pid] = rebuild.Rebuilder(lv, sys.modules[__name__])
+                save, notes = rb.build(online_id, base)
+                return save, notes, ''
+            except rebuild.RebuildError as e:
+                why.append(str(e))
+            except Exception as e:     # optional reading; any engine surprise falls back to the older paths
+                if rb is not None:
+                    rb._key = None
+                why.append('failed: %r' % (e,))
+        return None, [], '; '.join(why) or 'game memory not readable'
+
     def read_live(self, online_id):
         if self.no_live:
             return None, 'turned off'
@@ -1052,7 +1092,14 @@ class Syncer:
         blob = heroes.get(online_id)
         cached = None if blob else self.ctx.cached_heroes().get(online_id)
         source_text = None
-        if blob:
+        # 1.1: in the world the whole hero is rebuilt from the game (since ~2026-10-03 the server no longer
+        # sends the save itself); the newest earlier copy only fills in what the game does not have
+        rebuilt, rnotes, rwhy = self.rebuild(online_id, self.newest_base(online_id, hero, blob, cached))
+        if rebuilt:
+            live = None
+            source = rebuilt
+            src = 'rebuilt from the game in-world' + (' (%s)' % '; '.join(rnotes) if rnotes else '')
+        elif blob:
             addr, source, source_text = blob
             src = 'server copy in game memory, saved %s' % ticks_str(
                 source['CharacterSaveV1']['MetaData'].get('GameDataUpdated', 0))
@@ -1063,13 +1110,18 @@ class Syncer:
         else:
             prev = hero.get('last_output')
             if not prev or not Path(prev).exists():
-                raise SyncError('this hero is not in the game\'s memory right now. Go to the character select '
-                                'screen so the game loads it, then try again')
+                raise SyncError('this hero is not loaded right now. Load into the world with it (the game no '
+                                'longer gets the full hero at the character select screen), then try again')
             source = json.loads(Path(prev).read_text(encoding='utf-8'))
             source['CharacterSaveV1']['MetaData']['CharacterId'] = online_id
             source['CharacterSaveV1']['MetaData']['IsOnline'] = True
             src = 'previous sync %s (no server copy in memory right now)' % Path(prev).name
-        live, why = self.read_live(online_id)
+        if not rebuilt:
+            live, why = self.read_live(online_id)
+            if rwhy:
+                why = '%s; rebuild: %s' % (why, rwhy) if why else 'rebuild: ' + rwhy
+        else:
+            why = 'not needed, the whole hero was rebuilt from the game'
         others = {h.get('offline_id') for k, h in st['heroes'].items() if k != online_id} - {None}
         try:
             save, text, report, problems, notes = build_offline(self.ctx, online_id, offline_id, source,
@@ -1504,11 +1556,8 @@ class AutoSync:
         if in_world and cid and cid not in offline_ids and cid not in synced and self.s.lives \
                 and now >= self.next_live:
             self.next_live = now + TICK
-            if cid in self.ctx.cached_heroes():
-                self.sync(cid, heroes, cid, in_world, "this session's changes", None)
-            elif not (self.ctx.save_dir / ('Character%s.sav' % cid)).exists():
-                self.log('playing online hero %s, but its server copy has not been seen yet. It is picked up '
-                         'the next time the character select screen loads.' % cid[:8], key='nobase')
+            if not (self.ctx.save_dir / ('Character%s.sav' % cid)).exists():   # online (offline heroes have a file)
+                self.sync(cid, heroes, cid, in_world, 'game (in-world)', None)
 
         if now >= self.next_heartbeat and self.scans:
             n = len(self.scans)

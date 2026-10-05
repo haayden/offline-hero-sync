@@ -3,28 +3,35 @@
 Keeps an offline copy of your **Minecraft Dungeons II** online hero up to date, automatically. One way only (online to offline), read-only toward the game.
 
 **Download:** see [Releases](../../releases/latest).
-- `OfflineHeroSync-1.0.2.zip`: no install needed, bundles the official signed Python runtime.
-- `OfflineHeroSync-1.0.2-python.zip`: source only, needs Python 3.8+.
+- `OfflineHeroSync-1.1.0.zip`: no install needed, bundles the official signed Python runtime.
+- `OfflineHeroSync-1.1.0-python.zip`: source only, needs Python 3.8+.
 
 Also on [Nexus Mods](https://www.nexusmods.com/minecraftdungeons2/mods/75).
 
 ```
-OFFLINE HERO SYNC
-=================
+OFFLINE HERO SYNC 1.1
+=====================
 
 Keeps an offline copy of your online Minecraft Dungeons II hero up to date, automatically.
-Whenever your online hero changes, its offline copy gets the same level, gear, emeralds,
-enchantment points, quests, unlocks and cosmetics.
+While you play your online hero, its offline copy gets the same level, gear, enchantments,
+emeralds, echo shards, quests, map progress, achievements and cosmetics.
 
 Handy if you want to use gameplay mods on your main (they only work on offline heroes), or
 just want an offline version of your main that keeps up with it.
+
+NEW IN 1.1
+----------
+Since about Oct 3 the game no longer receives your whole online hero at the character select
+screen (a change on Mojang's side), which is where 1.0 copied it from. 1.1 rebuilds the hero
+from what the game has loaded while you play it in the world instead, so it works again for
+everyone, including heroes it has never seen before.
 
 READ THIS FIRST
 ---------------
 - One way only: online -> offline. Nothing ever goes back to your online hero.
 - It's a mirror. When your online hero changes, the offline copy is replaced with it, so
   progress you made on the offline copy gets overwritten. The replaced file is backed up first
-  (the newest 20 per hero are kept).
+  (the newest 20 per hero are kept, plus the first backup of every day).
 - It never touches the offline copy while you're playing it.
 - Your online hero is not changed. The tool only reads from the game. It never writes to the
   game and never sends anything anywhere.
@@ -33,8 +40,8 @@ HOW TO USE
 ----------
 1. Unzip the folder somewhere it can stay (for example Documents\OfflineHeroSync).
 2. Double-click "Start Offline Hero Sync.cmd". Nothing pops up. It runs in the background.
-3. Start the game and go to the character select screen. The first time, it makes an offline
-   copy of each online hero it sees. Restart the game and the copy shows up in your hero list.
+3. Start the game and load into the world with your online hero. Within 30 seconds it makes
+   the offline copy. Restart the game and the copy shows up in your hero list.
 
 Start it with Windows (optional): open a command prompt in the folder and run
     "Offline Hero Sync (command line).cmd" --install-autostart
@@ -48,13 +55,20 @@ Heroes don't have names in the save data, so the log lists them by level, power 
 
 WHEN DOES IT SYNC
 -----------------
-- The game only keeps the server's copy of your online hero in memory for a short while
-  after the character select screen loads. The tool watches for it and saves it right away.
-- While you play the online hero, it also copies this session's emeralds, XP and items to the
-  offline copy every 30 seconds.
-- Quest and map progress come from the server's copy, so they update the next time you're on
-  the character select screen.
-- If you're playing the offline copy when something new comes in, it waits until you leave it.
+- Every 30 seconds while you play your online hero in the world, if anything changed.
+- If you're playing the offline copy, it waits until you leave it.
+
+WHAT IT CAN'T COPY
+------------------
+The game only has what Mojang's server sends it, so a few things come from the tool's earlier
+copy of your hero when it has one, and are missing on a brand-new copy:
+- Gates, doors and levers you opened in the world (they may be closed again on the copy).
+- The full lists behind the collection screen. A new copy starts them from the gear you own,
+  so the collection percentages can read lower.
+- A few "do X once" achievements (equip a unique, reforge, buy from the merchant, defeat a
+  monarch).
+- The hidden roll data of gear you pick up after the copy was first made. The gear itself
+  (item power, effects, enchantments, level) is copied exactly.
 
 WHERE THINGS GO
 ---------------
@@ -62,7 +76,7 @@ Offline heroes:  %LOCALAPPDATA%\Dungeons2\Saved\SaveGames\Character<id>.sav
 Tool data:       %LOCALAPPDATA%\OfflineHeroSync\
                    autosync.log  what it did and when
                    state.json    which offline copy belongs to which online hero
-                   cache\        the last server copy it saw of each online hero
+                   out\          the last copy it built of each hero
                    backups\      offline copies saved before they were replaced
 
 To restore a backup: stop the tool, close the game, copy the file from backups\ into SaveGames
@@ -72,11 +86,9 @@ folder above. Delete the offline hero in the game if you don't want it.
 
 CPU USE
 -------
-While the game is closed it only looks at the process list every 10 seconds. While the game
-runs it reads the game's memory every 30 seconds at the menu (every 5 seconds for two minutes
-after the game starts or you switch between menu and world) and every 5 minutes in-world.
-One read takes 1 to 2 seconds of one CPU core. The live copy while you play the online hero
-reads a few thousand values every 30 seconds.
+While the game is closed it only looks at the process list every 10 seconds. While you play,
+it reads the game's memory every 30 seconds; the first read after loading in takes a few
+seconds of one CPU core, the rest well under a second.
 
 ANTIVIRUS WARNINGS
 ------------------
@@ -100,7 +112,7 @@ Run these through "Offline Hero Sync (command line).cmd" from a command prompt i
   --install-autostart / --uninstall-autostart   start at login, or stop doing that
   --status                 running or not, which heroes, last log lines
   --stop                   stop the background sync
-  --list                   online heroes in game memory (or the cached ones)
+  --list                   online heroes the tool knows
   --hero 1                 dry run for one hero: builds the copy into the out folder only
   --hero 1 --write         one-off write (asks for --replace-played if the copy was played)
   --cli                    one-off step-by-step version in a console window
@@ -109,9 +121,8 @@ Run these through "Offline Hero Sync (command line).cmd" from a command prompt i
 
 NOTES
 -----
-- Windows only. Tested on the Steam version. The Microsoft Store / Xbox app version is untested;
-  if it keeps its saves somewhere else, use --save-dir.
-- After a game patch the in-session copy may stop working. The tool then uses the server's copy
-  from the character select screen, which still works.
-
+- Windows, Steam version. The Xbox app / Minecraft Launcher version isn't supported yet (it
+  keeps its saves in a different place and format); that's next.
+- After a game patch the tool may need an update to read the game. It then just stops syncing
+  and says why in the log; it never writes a broken copy.
 ```
