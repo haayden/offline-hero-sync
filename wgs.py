@@ -38,11 +38,19 @@ def local_appdata():
 
 def user_dirs():
     """[<user>_<title> dirs] of the game's WGS store, newest index first."""
-    root = local_appdata() / 'Packages' / PACKAGE / 'SystemAppData' / 'wgs'
-    if not root.is_dir():
-        return []
-    out = [d for d in root.iterdir() if d.is_dir() and d.name != 't' and 'backup' not in d.name.lower()
-           and len(d.name.split('_')) == 2 and (d / 'containers.index').is_file()]
+    # the Xbox app and the Minecraft Launcher install the same GDK build (C:\XboxGames\Minecraft Dungeons II);
+    # match any MD2 package in case one registers under a different name
+    pk = local_appdata() / 'Packages'
+    roots = [pk / PACKAGE / 'SystemAppData' / 'wgs']
+    try:
+        roots += [p / 'SystemAppData' / 'wgs' for p in pk.glob('*MinecraftDungeons2*') if p.name != PACKAGE]
+    except OSError:
+        pass
+    out = []
+    for root in roots:
+        if root.is_dir():
+            out += [d for d in root.iterdir() if d.is_dir() and d.name != 't' and 'backup' not in d.name.lower()
+                    and len(d.name.split('_')) == 2 and (d / 'containers.index').is_file()]
     return sorted(out, key=lambda d: (d / 'containers.index').stat().st_mtime, reverse=True)
 
 
