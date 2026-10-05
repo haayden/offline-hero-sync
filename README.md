@@ -3,13 +3,13 @@
 Keeps an offline copy of your **Minecraft Dungeons II** online hero up to date, automatically. One way only (online to offline), read-only toward the game.
 
 **Download:** see [Releases](../../releases/latest).
-- `OfflineHeroSync-1.1.0.zip`: no install needed, bundles the official signed Python runtime.
-- `OfflineHeroSync-1.1.0-python.zip`: source only, needs Python 3.8+.
+- `OfflineHeroSync-1.2.0.zip`: no install needed, bundles the official signed Python runtime.
+- `OfflineHeroSync-1.2.0-python.zip`: source only, needs Python 3.8+.
 
 Also on [Nexus Mods](https://www.nexusmods.com/minecraftdungeons2/mods/75).
 
 ```
-OFFLINE HERO SYNC 1.1
+OFFLINE HERO SYNC 1.2
 =====================
 
 Keeps an offline copy of your online Minecraft Dungeons II hero up to date, automatically.
@@ -19,12 +19,29 @@ emeralds, echo shards, quests, map progress, achievements and cosmetics.
 Handy if you want to use gameplay mods on your main (they only work on offline heroes), or
 just want an offline version of your main that keeps up with it.
 
-NEW IN 1.1
+NEW IN 1.2
 ----------
-Since about Oct 3 the game no longer receives your whole online hero at the character select
-screen (a change on Mojang's side), which is where 1.0 copied it from. 1.1 rebuilds the hero
-from what the game has loaded while you play it in the world instead, so it works again for
-everyone, including heroes it has never seen before.
+- An emerald icon by the clock shows what it's doing, and a notification tells you when your
+  offline copy is made or updated. Everything is in its right-click menu.
+- "Start with Windows" is one click in that menu. It's off until you turn it on.
+- Updating is just starting the new version: it closes the old one for you.
+- Xbox app / Minecraft Launcher version: not in this release yet. It's being tested; the beta
+  is on GitHub (https://github.com/haayden/offline-hero-sync/releases).
+
+Since 1.1 it copies your hero while you play it in the world (Mojang stopped sending the whole
+hero to the character select screen around Oct 3), so it works for every hero, including ones
+it has never seen before.
+
+IS IT SAFE?
+-----------
+- There's no exe of mine in here. The tool is plain Python source in the app folder that you can
+  read, run by the official Python runtime (python.exe / pythonw.exe in the runtime folder,
+  digitally signed by the Python Software Foundation). Same code on GitHub:
+  https://github.com/haayden/offline-hero-sync
+- It opens the game read-only, so it can look at your hero but can't change anything in the
+  game. No injection, no DLLs, no hooks. It never touches the internet, and it writes nothing
+  but your offline copies and its own folder (%LOCALAPPDATA%\OfflineHeroSync: log, backups).
+- It doesn't add itself to startup or hide. You see an icon by the clock while it runs.
 
 READ THIS FIRST
 ---------------
@@ -39,17 +56,19 @@ READ THIS FIRST
 HOW TO USE
 ----------
 1. Unzip the folder somewhere it can stay (for example Documents\OfflineHeroSync).
-2. Double-click "Start Offline Hero Sync.cmd". Nothing pops up. It runs in the background.
+2. Double-click "Start Offline Hero Sync.cmd". An emerald appears by the clock (if you don't
+   see it, click the little ^ arrow next to the clock).
 3. Start the game and load into the world with your online hero. Within 30 seconds it makes
-   the offline copy. Restart the game and the copy shows up in your hero list.
+   the offline copy and tells you. Restart the game and the copy shows up in your hero list.
 
-Start it with Windows (optional): open a command prompt in the folder and run
-    "Offline Hero Sync (command line).cmd" --install-autostart
-It starts now and at every login. Undo it with --uninstall-autostart.
+That's it. Right-click the emerald to see what it's doing, turn "Start with Windows" on or off,
+open the log or the backups folder, or quit it. If you don't turn on "Start with Windows",
+double-click the .cmd again next time before you play.
 
-Is it working? Open %LOCALAPPDATA%\OfflineHeroSync\autosync.log, or run
-    "Offline Hero Sync (command line).cmd" --status
-Stop it: "Offline Hero Sync (command line).cmd" --stop (or end pythonw.exe in Task Manager).
+UPDATING
+--------
+Unzip the new version and double-click "Start Offline Hero Sync.cmd". It closes the old version
+by itself and takes over (and if "Start with Windows" was on, it now starts the new one).
 
 Heroes don't have names in the save data, so the log lists them by level, power and skin.
 
@@ -79,10 +98,11 @@ Tool data:       %LOCALAPPDATA%\OfflineHeroSync\
                    out\          the last copy it built of each hero
                    backups\      offline copies saved before they were replaced
 
-To restore a backup: stop the tool, close the game, copy the file from backups\ into SaveGames
-and rename it to Character<id>.sav (remove the date part).
-To remove everything: --uninstall-autostart, delete the tool's folder and the OfflineHeroSync
-folder above. Delete the offline hero in the game if you don't want it.
+To restore a backup: quit the tool (emerald menu > Quit), close the game, copy the file from
+backups\ into SaveGames and rename it to Character<id>.sav (remove the date part).
+To remove everything: in the emerald menu untick "Start with Windows", then Quit. Delete the
+tool's folder and the OfflineHeroSync folder above. Delete the offline hero in the game if you
+don't want it.
 
 CPU USE
 -------
@@ -106,8 +126,8 @@ SAFETY DETAILS
   save, and your online hero has no save file on your PC to begin with.
 - Only one copy runs at a time.
 
-COMMAND LINE (optional)
------------------------
+COMMAND LINE (for tinkerers, you don't need it)
+-----------------------------------------------
 Run these through "Offline Hero Sync (command line).cmd" from a command prompt in the folder.
   --install-autostart / --uninstall-autostart   start at login, or stop doing that
   --status                 running or not, which heroes, last log lines
@@ -121,8 +141,8 @@ Run these through "Offline Hero Sync (command line).cmd" from a command prompt i
 
 NOTES
 -----
-- Windows, Steam version. The Xbox app / Minecraft Launcher version isn't supported yet (it
-  keeps its saves in a different place and format); that's next.
+- Windows, Steam version. The Xbox app / Minecraft Launcher version keeps its saves in a
+  different format; support for it is in testing (beta on GitHub).
 - After a game patch the tool may need an update to read the game. It then just stops syncing
   and says why in the log; it never writes a broken copy.
 ```

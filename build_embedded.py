@@ -22,7 +22,8 @@ PYDS = ["_ctypes.pyd", "libffi-8.dll", "_uuid.pyd", "_hashlib.pyd", "libcrypto-3
 SKIP_LIB = {"test", "idlelib", "tkinter", "turtledemo", "ensurepip", "venv", "lib2to3", "site-packages",
             "pydoc_data", "__phello__", "_pyrepl", "sqlite3", "dbm", "curses", "wsgiref", "xmlrpc", "http", "email",
             "html", "urllib", "asyncio", "unittest", "multiprocessing", "concurrent"}
-APP_FILES = ["offline_hero_sync.py", "uemem.py", "winproc.py", "rebuild.py", "savejson.py", "wgs.py"]
+APP_FILES = ["offline_hero_sync.py", "uemem.py", "winproc.py", "rebuild.py", "savejson.py", "wgs.py", "tray.py",
+             "icon.ico"]
 
 START_CMD = '@echo off\r\nstart "" "%~dp0runtime\\pythonw.exe" "%~dp0app\\offline_hero_sync.py" %*\r\n'
 CLI_CMD = '@echo off\r\n"%~dp0runtime\\python.exe" "%~dp0app\\offline_hero_sync.py" %*\r\n'

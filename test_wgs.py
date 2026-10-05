@@ -74,9 +74,11 @@ def main():
     raw = (user / 'containers.index').read_bytes()
     check(wgs.Index(user).to_bytes() == raw, 'containers.index parses and writes back byte for byte')
 
-    ctx = ohs.Ctx(data_dir=TMP / 'tool')
+    check(ohs.Ctx(data_dir=TMP / 'tool').wgs is None or ohs.XBOX_AUTO,
+          'without --xbox the Xbox store is only picked by itself when XBOX_AUTO is on')
+    ctx = ohs.Ctx(data_dir=TMP / 'tool', xbox=True)
     check(ctx.wgs is not None and ctx.save_dir == TMP / 'tool' / 'xbox' / user.name / 'SaveGames',
-          'no Steam SaveGames folder: the Xbox store is used, through a mirror')
+          'with --xbox the Xbox store is used, through a mirror')
     ctx.xbox_sync(game_running=False)
     check((ctx.save_dir / ('Character%s.sav' % played)).read_bytes() == save_json(played, 7) and
           (ctx.save_dir / 'GlobalSaveDataDefault.sav').read_bytes() == b'{"global":1}',

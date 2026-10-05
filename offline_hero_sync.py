@@ -70,6 +70,7 @@ from winproc import Process, GameNotRunning, MEMORY_BASIC_INFORMATION, find_game
 
 APP = 'Offline Hero Sync'
 VERSION = '1.2.0'
+XBOX_AUTO = False       # pick the Xbox app saves by itself when there are no Steam saves (on once Xbox is confirmed)
 
 HEADER = b'{"SerializeMeta":{'
 MAX_BLOB = 64 << 20
@@ -118,8 +119,9 @@ def default_save_dir():
 
 def pick_xbox_store(xbox):
     """The Xbox app / Minecraft Launcher save store to use, or None for the Steam build.
-    xbox: True = use it, False = never, None = only when there is no Steam SaveGames folder."""
-    if xbox is False:
+    xbox: True = use it, False = never, None = only when there is no Steam SaveGames folder and XBOX_AUTO is on
+    (off in 1.2.0: the Xbox writer is a beta that no Xbox player has confirmed yet, so it needs --xbox)."""
+    if xbox is False or (xbox is None and not XBOX_AUTO):
         return None
     dirs = wgs.user_dirs()
     if not dirs:
@@ -1562,6 +1564,22 @@ class AutoSync:
         self.next_live = 0
         self.next_heartbeat = time.time() + HEARTBEAT
         self.scans = []
+        self.tray = None                 # tray.Tray when run from run_auto (None in tests / --no-tray)
+        self.session_writes = []         # descriptions of copies written while the game ran
+        self.last_copy = ''              # "level 100, Silver, 02:51" for the tray
+        self.noted = set()               # problems already shown as a notification
+
+    # ---- tray ----------------------------------------------------------------------------------------------------
+    def status(self, text):
+        if self.tray:
+            self.tray.set_status(text + ('\nLast copy: ' + self.last_copy if self.last_copy else ''))
+
+    def notify(self, title, text, key=None, warning=False):
+        if not self.tray or (key and key in self.noted):
+            return
+        if key:
+            self.noted.add(key)
+        self.tray.notify(title, text, warning)
 
     def run(self):
         _, k = _k32()
@@ -1594,12 +1612,15 @@ class AutoSync:
 
     def xbox(self, game_running, force=False):
         if not self.ctx.wgs or (not force and time.time() < getattr(self, 'next_xbox', 0)):
-            return
+            return []
         self.next_xbox = time.time() + 60
         try:
-            self.ctx.xbox_sync(game_running, self.log)
+            return self.ctx.xbox_sync(game_running, self.log)
         except Exception as e:            # never die on the save store; say why
             self.log('Xbox saves: %r' % (e,), key='xbox')
+            self.notify('Offline Hero Sync', 'Could not read or write the Xbox app saves: %s' % e, key='xbox',
+                        warning=True)
+        return []
 
     def tick(self):
         now = time.time()
@@ -1608,9 +1629,19 @@ class AutoSync:
                 self.log('game closed')
                 self.s.detach()
                 self.pids, self.last_state = set(), None
-                self.xbox(False, force=True)
+                written = self.xbox(False, force=True)
+                if self.session_writes:
+                    if self.ctx.wgs:
+                        if written:
+                            self.notify('Offline copy saved', 'Your offline copy (%s) is in the game\'s saves now. '
+                                        'Start the game to play it.' % self.session_writes[-1])
+                    else:
+                        self.notify('Offline copy up to date', 'Your offline copy (%s) is up to date. You\'ll see '
+                                    'the changes next time you start the game.' % self.session_writes[-1])
+                self.session_writes = []
             self.xbox(False)
             self.log('waiting for the game to start', key='game')
+            self.status('Waiting for the game to start')
             return IDLE_SLEEP
         self.s.attach()
         pids = set(self.s.procs)
@@ -1626,6 +1657,16 @@ class AutoSync:
             self.log('state: ' + self.describe_state(cid, in_world, offline_ids))
             self.last_state = (cid, in_world)
             self.burst_until, self.next_scan = now + BURST_LEN, 0
+        if not self.s.lives:
+            self.status('Game running, waiting until it can read it')
+        elif in_world and cid in offline_ids:
+            self.status('You\'re playing the offline copy. It updates after you leave it')
+        elif in_world and cid and not (self.ctx.save_dir / ('Character%s.sav' % cid)).exists():
+            self.status('Copying your online hero while you play')
+        elif in_world:
+            self.status('Playing an offline hero. Play your online hero to copy it')
+        else:
+            self.status('Game running: load into the world with your online hero')
 
         heroes = {}
         if now >= self.next_scan:
@@ -1679,6 +1720,9 @@ class AutoSync:
             self.ctx.save_state(st)
             self.log('hero %s: built copy failed its checks, not written: %s' % (hid[:8], '; '.join(r['problems'])),
                      key='prob-' + hid)
+            self.notify('Offline Hero Sync', 'Could not make a safe copy of your hero, so nothing was written. '
+                        'Right-click the emerald by the clock > Open the log for details.', key='prob-' + hid,
+                        warning=True)
             return
         new_hash = content_hash(r['save'])
         if new_hash == hero.get('last_source_hash'):
@@ -1691,6 +1735,7 @@ class AutoSync:
             self.ctx.save_state(st)
             self.log('hero %s: not synced, you are playing its offline copy right now.' % hid[:8], key='skip-' + hid)
             return
+        is_new = not target_path(self.ctx, oid).exists()
         try:
             msg = write_offline(self.ctx, hero, hid, r['save'], r['text'], replace_played=True,
                                 in_world_id=cid2 if in_world2 else None)
@@ -1708,9 +1753,72 @@ class AutoSync:
                 hid[:8], describe(r['save']), oid[:8], why,
                 "with this session's changes" if r['live_used'] else 'server copy',
                 '; previous file backed up' if hero.get('last_backup') else ''))
+            short = short_describe(r['save'])
+            self.last_copy = '%s, %s' % (short, time.strftime('%H:%M'))
+            self.session_writes.append(short)
+            if is_new:
+                self.notify('Offline copy made', 'Your %s hero has an offline copy now. %s' % (
+                    short, 'Close the game and it\'s saved into the game; start it again to see it.'
+                    if self.ctx.wgs else 'Restart the game to see it in your hero list.'))
 
 
-def run_auto(ctx, no_live=False, rescan=False):
+def short_describe(save):
+    """'level 100, Silver' for notifications."""
+    c = save['CharacterSaveV1']
+    skin = c.get('Cosmetics', {}).get('Cosmetics', {}).get('SW.Skin', {}).get('TypeTag', '')
+    return 'level %s%s' % (c['MetaData'].get('Level', '?'), ', ' + tag_tail(skin, 'SW.Skin.') if skin else '')
+
+
+def autostart_installed():
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            winreg.QueryValueEx(k, RUN_VALUE)
+        return True
+    except OSError:
+        return False
+
+
+def set_autostart(on, argv_extra=()):
+    """Only the registry entry (the tray's checkbox): never starts or stops a process."""
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+        if on:
+            winreg.SetValueEx(k, RUN_VALUE, 0, winreg.REG_SZ, autostart_command(argv_extra)[0])
+        else:
+            try:
+                winreg.DeleteValue(k, RUN_VALUE)
+            except FileNotFoundError:
+                pass
+
+
+def start_tray(ctx, argv_extra=()):
+    try:
+        import tray
+    except Exception:
+        return None
+    st = ctx.load_state()
+    first = not st.get('autostart_offered')
+    if first:
+        # first start: only point at the menu's "Start with Windows" (never added without the player ticking it)
+        st['autostart_offered'] = True
+        ctx.save_state(st)
+    elif autostart_installed():
+        # already starting with Windows, maybe from an older folder: point it at this copy
+        try:
+            set_autostart(True, argv_extra)
+        except OSError:
+            pass
+    t = tray.Tray(APP, icon_path=str(Path(__file__).resolve().with_name('icon.ico')), on_quit=request_stop,
+                  autostart=(autostart_installed, lambda on: set_autostart(on, argv_extra)),
+                  log_path=str(ctx.log_file), backup_dir=str(ctx.backup_dir)).start()
+    t.notify('Offline Hero Sync is running', 'Load into the world with your online hero to make its offline copy. '
+             'It runs from the emerald by the clock.%s'
+             % (' Right-click it for "Start with Windows".' if first and not autostart_installed() else ''))
+    return t
+
+
+def run_auto(ctx, no_live=False, rescan=False, no_tray=False, argv_extra=()):
     if ctx.wgs:
         AutoLog(ctx)('saves: Xbox app / Minecraft Launcher build (%s); copies are written into the game while '
                      'it is closed' % ctx.wgs.dir)
@@ -1718,9 +1826,29 @@ def run_auto(ctx, no_live=False, rescan=False):
     log = AutoLog(ctx, echo)
     h = acquire_instance()
     if not h:
-        log('another copy is already running; this one exits')
-        return 0
-    return AutoSync(ctx, no_live=no_live, rescan=rescan, echo=echo).run()
+        # an older (or the same) version is running: every version since 1.0.2 quits on the stop event, so the copy
+        # that was started last takes over and updating is just starting the new one
+        request_stop()
+        for _ in range(60):
+            time.sleep(0.5)
+            h = acquire_instance()
+            if h:
+                log('took over from the copy that was already running')
+                break
+        else:
+            log('another copy is already running and did not stop; this one exits')
+            return 0
+    a = AutoSync(ctx, no_live=no_live, rescan=rescan, echo=echo)
+    if not no_tray:
+        try:
+            a.tray = start_tray(ctx, argv_extra)
+        except Exception as e:            # the tray is a nicety; the sync runs without it
+            log('tray icon unavailable: %r' % (e,))
+    try:
+        return a.run()
+    finally:
+        if a.tray:
+            a.tray.stop()
 
 
 # --------------------------------------------------------------------------- adopt / autostart / status
@@ -1821,7 +1949,7 @@ def status_text(ctx):
     return '\n'.join(lines)
 
 
-AUTO_OPTS = ('--auto', '--save-dir', '--data-dir', '--no-live', '--rescan', '--xbox', '--steam')
+AUTO_OPTS = ('--auto', '--save-dir', '--data-dir', '--no-live', '--rescan', '--xbox', '--steam', '--no-tray')
 
 
 def wants_auto(argv):
@@ -1900,6 +2028,7 @@ def build_parser():
                     help='use the Xbox app / Minecraft Launcher saves (default: only when there is no Steam '
                          'SaveGames folder)')
     ap.add_argument('--steam', action='store_true', help='use the Steam saves even if Xbox app saves exist')
+    ap.add_argument('--no-tray', action='store_true', help='background sync without the tray icon and notifications')
     ap.add_argument('--xbox-info', action='store_true',
                     help='list the Xbox app saves this tool sees (read-only) and exit')
     ap.add_argument('--version', action='version', version='%s %s' % (APP, VERSION))
@@ -1917,8 +2046,13 @@ def main(argv=None):
         return 2
     if wants_auto(argv):
         args = build_parser().parse_args(argv)
+        extra = []
+        for k in ('save_dir', 'data_dir'):
+            if getattr(args, k):
+                extra += ['--' + k.replace('_', '-'), str(Path(getattr(args, k)).resolve())]
+        extra += ['--xbox'] if args.xbox else ['--steam'] if args.steam else []
         return run_auto(Ctx(args.save_dir, args.data_dir, xbox_choice(args)), no_live=args.no_live,
-                        rescan=args.rescan)
+                        rescan=args.rescan, no_tray=args.no_tray, argv_extra=extra)
     opened = setup_console(new_window='--cli' in argv)
     try:
         return run(argv)
